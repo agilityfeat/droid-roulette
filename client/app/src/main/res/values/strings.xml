@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Droid Roulette</string>
+    <string name="status_unknown">Unknown</string>
+    <string name="status_connecting">Connecting …</string>
+    <string name="status_connected">Connected!</string>
+    <string name="status_matching">Matching …</string>
+    <string name="status_failed">Failed</string>
+    <string name="connect_btn">Connect</string>
+    <string name="status_finished">Finished</string>
+</resources>
