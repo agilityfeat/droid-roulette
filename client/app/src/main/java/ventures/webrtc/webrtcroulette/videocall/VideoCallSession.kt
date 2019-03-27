@@ -22,23 +22,16 @@ enum class VideoCallStatus(val label: Int, val color: Int) {
     FINISHED(R.string.status_finished, R.color.colorConnected);
 }
 
-data class VideoRenderers(private val localView: SurfaceViewRenderer?, private val remoteView: SurfaceViewRenderer?) {
-    val localRenderer: (VideoRenderer.I420Frame) -> Unit =
-        if(localView == null) this::sink else { f -> localView.renderFrame(f) }
-    val remoteRenderer: (VideoRenderer.I420Frame) -> Unit =
-        if(remoteView == null) this::sink else { f -> remoteView.renderFrame(f) }
-
-    private fun sink(frame: VideoRenderer.I420Frame) {
-        Log.w("VideoRenderer", "Missing surface view, dropping frame")
-        VideoRenderer.renderFrameDone(frame)
-    }
-}
+data class VideoSinks(
+        val localView: SurfaceViewRenderer?,
+        val remoteView: SurfaceViewRenderer?
+)
 
 class VideoCallSession(
         private val context: Context,
         private val onStatusChangedListener: (VideoCallStatus) -> Unit,
         private val signaler: SignalingWebSocket,
-        private val videoRenderers: VideoRenderers)  {
+        private val videoSinks: VideoSinks)  {
 
     private var peerConnection : PeerConnection? = null
     private var factory : PeerConnectionFactory? = null
@@ -47,6 +40,12 @@ class VideoCallSession(
     private var audioSource : AudioSource? = null
     private val eglBase = EglBase.create()
     private var videoCapturer: VideoCapturer? = null
+
+    private val mediaConstraints = MediaConstraints().apply {
+        mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
+        mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
+        optional.add(MediaConstraints.KeyValuePair("RtpDataChannels", "true"))
+    }
 
     val renderContext: EglBase.Context
         get() = eglBase.eglBaseContext
@@ -92,24 +91,26 @@ class VideoCallSession(
     }
 
     private fun init() {
-        PeerConnectionFactory.initializeAndroidGlobals(context, true)
-        val opts = PeerConnectionFactory.Options()
-        opts.networkIgnoreMask = 0
+        val createInitializationOptions = PeerConnectionFactory.InitializationOptions.builder(context).createInitializationOptions()
+        PeerConnectionFactory.initialize(createInitializationOptions)
 
-        factory = PeerConnectionFactory(opts)
-        factory?.setVideoHwAccelerationOptions(eglBase.eglBaseContext, eglBase.eglBaseContext)
+        factory = PeerConnectionFactory.builder()
+                .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase.eglBaseContext))
+                .setVideoEncoderFactory(DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, true))
+                .setOptions(PeerConnectionFactory.Options())
+                .createPeerConnectionFactory()
 
         val iceServers = arrayListOf(
-                PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
+                PeerConnection.IceServer
+                        .builder("stun:stun.l.google.com:19302")
+                        .createIceServer()
         )
 
-        val constraints = MediaConstraints()
-        constraints.mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
-        constraints.mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
-        val rtcCfg = PeerConnection.RTCConfiguration(iceServers)
-        rtcCfg.continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+        val rtcConfig = PeerConnection.RTCConfiguration(iceServers)
+        rtcConfig.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+        rtcConfig.continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
         val rtcEvents = SimpleRTCEventHandler(this::handleLocalIceCandidate, this::addRemoteStream, this::removeRemoteStream)
-        peerConnection = factory?.createPeerConnection(rtcCfg, constraints, rtcEvents)
+        peerConnection = factory?.createPeerConnection(rtcConfig, rtcEvents)
         setupMediaDevices()
     }
 
@@ -119,7 +120,7 @@ class VideoCallSession(
 
     private fun maybeCreateOffer() {
         if(isOfferingPeer) {
-            peerConnection?.createOffer(SDPCreateCallback(this::createDescriptorCallback), MediaConstraints())
+            peerConnection?.createOffer(SDPCreateCallback(this::createDescriptorCallback), this.mediaConstraints)
         }
     }
 
@@ -135,7 +136,7 @@ class VideoCallSession(
             if(stream.videoTracks.isNotEmpty()) {
                 val remoteVideoTrack = stream.videoTracks.first()
                 remoteVideoTrack.setEnabled(true)
-                remoteVideoTrack.addRenderer(VideoRenderer(videoRenderers.remoteRenderer))
+                remoteVideoTrack.addSink(videoSinks.remoteView)
             }
         }
     }
@@ -155,7 +156,6 @@ class VideoCallSession(
     }
 
     private fun setupMediaDevices() {
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             val camera2 = Camera2Enumerator(context)
             if(camera2.deviceNames.isNotEmpty()) {
@@ -163,66 +163,43 @@ class VideoCallSession(
                 videoCapturer = camera2.createCapturer(selectedDevice, null)
             }
         }
-        if(videoCapturer == null) {
+        if (videoCapturer == null) {
             val camera1 = Camera1Enumerator(true)
             val selectedDevice = camera1.deviceNames.firstOrNull(camera1::isFrontFacing) ?: camera1.deviceNames.first()
             videoCapturer = camera1.createCapturer(selectedDevice, null)
         }
 
-
-        videoSource = factory?.createVideoSource(videoCapturer)
+        val surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", renderContext)
+        videoSource = factory?.createVideoSource(videoCapturer?.isScreencast ?: false)
+        videoSource?.capturerObserver?.let { videoCapturer?.initialize(surfaceTextureHelper, context, it) }
+        val videoTrack = factory?.createVideoTrack(VIDEO_TRACK_LABEL, videoSource)
+        videoTrack?.addSink(videoSinks.localView)
 
         videoCapturer?.startCapture(640, 480, 24)
+        peerConnection?.addTrack(videoTrack, listOf("video0"))
 
-        val stream = factory?.createLocalMediaStream(STREAM_LABEL)
-        val videoTrack = factory?.createVideoTrack(VIDEO_TRACK_LABEL, videoSource)
-
-        val videoRenderer = VideoRenderer(videoRenderers.localRenderer)
-        videoTrack?.addRenderer(videoRenderer)
-        stream?.addTrack(videoTrack)
-
-        audioSource = factory?.createAudioSource(createAudioConstraints())
+        audioSource = factory?.createAudioSource(this.mediaConstraints)
         val audioTrack = factory?.createAudioTrack(AUDIO_TRACK_LABEL, audioSource)
-
-        stream?.addTrack(audioTrack)
-
-        peerConnection?.addStream(stream)
+        peerConnection?.addTrack(audioTrack)
     }
 
-    private fun createAudioConstraints(): MediaConstraints {
-        val audioConstraints = MediaConstraints()
-        audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "false"))
-        audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "false"))
-        audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "false"))
-        audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "false"))
-        return audioConstraints
-    }
-
-    private fun handleRemoteDescriptor(sdp: String) {
-        if(isOfferingPeer) {
-            peerConnection?.setRemoteDescription(SDPSetCallback({ setError ->
-                if(setError != null) {
-                    Log.e(TAG, "setRemoteDescription failed: $setError")
-                }
-            }), SessionDescription(SessionDescription.Type.ANSWER, sdp))
-        } else {
-            peerConnection?.setRemoteDescription(SDPSetCallback({ setError ->
-                if(setError != null) {
-                    Log.e(TAG, "setRemoteDescription failed: $setError")
-                } else {
-                    peerConnection?.createAnswer(SDPCreateCallback(this::createDescriptorCallback), MediaConstraints())
-                }
-            }), SessionDescription(SessionDescription.Type.OFFER, sdp))
-        }
+    private fun handleRemoteDescriptor(sdp: SessionDescription) {
+        peerConnection?.setRemoteDescription(SDPSetCallback { setError ->
+            if (setError != null) {
+                Log.e(TAG, "setRemoteDescription failed: $setError")
+            } else if (!isOfferingPeer) {
+                peerConnection?.createAnswer(SDPCreateCallback(this::createDescriptorCallback), this.mediaConstraints)
+            }
+        }, sdp)
     }
 
     private fun createDescriptorCallback(result: SDPCreateResult) {
         when(result) {
             is SDPCreateSuccess -> {
-                peerConnection?.setLocalDescription(SDPSetCallback({ setResult ->
+                peerConnection?.setLocalDescription(SDPSetCallback { setResult ->
                     Log.i(TAG, "SetLocalDescription: $setResult")
-                }), result.descriptor)
-                signaler.sendSDP(result.descriptor.description)
+                    signaler.sendSDP(result.descriptor.type.ordinal, result.descriptor.description)
+                }, result.descriptor)
             }
             is SDPCreateFailure -> Log.e(TAG, "Error creating offer: ${result.reason}")
         }
@@ -236,7 +213,8 @@ class VideoCallSession(
                 start()
             }
             is SDPMessage -> {
-                handleRemoteDescriptor(message.sdp)
+                val map = SessionDescription.Type.values().associateBy(SessionDescription.Type::ordinal)
+                handleRemoteDescriptor(SessionDescription(map[message.sdpType], message.sdp))
             }
             is ICEMessage -> {
                 handleRemoteCandidate(message.label, message.id, message.candidate)
@@ -246,7 +224,6 @@ class VideoCallSession(
             }
         }
     }
-
 
     fun terminate() {
         signaler.close()
@@ -258,19 +235,16 @@ class VideoCallSession(
         videoSource?.dispose()
 
         audioSource?.dispose()
-
         peerConnection?.dispose()
-
         factory?.dispose()
-
         eglBase.release()
     }
 
     companion object {
 
-        fun connect(context: Context, url: String, videoRenderers: VideoRenderers, callback: (VideoCallStatus) -> Unit) : VideoCallSession {
+        fun connect(context: Context, url: String, sinks: VideoSinks, callback: (VideoCallStatus) -> Unit) : VideoCallSession {
             val websocketHandler = SignalingWebSocket()
-            val session = VideoCallSession(context, callback, websocketHandler, videoRenderers)
+            val session = VideoCallSession(context, callback, websocketHandler, sinks)
             val client = OkHttpClient()
             val request = Request.Builder().url(url).build()
             Log.i(TAG, "Connecting to $url")
@@ -279,10 +253,9 @@ class VideoCallSession(
             return session
         }
 
-        private val STREAM_LABEL = "remoteStream"
-        private val VIDEO_TRACK_LABEL = "remoteVideoTrack"
-        private val AUDIO_TRACK_LABEL = "remoteAudioTrack"
-        private val TAG = "VideoCallSession"
+        const val VIDEO_TRACK_LABEL = "remoteVideoTrack"
+        const val AUDIO_TRACK_LABEL = "remoteAudioTrack"
+        const val TAG = "VideoCallSession"
         private val executor = Executors.newSingleThreadExecutor()
     }
 }
