@@ -22,7 +22,7 @@ enum class MessageType(val value: String) {
 
 open class ClientMessage(val type: MessageType)
 
-data class SDPMessage(val sdp: String) : ClientMessage(MessageType.SDPMessage)
+data class SDPMessage(val sdpType: Int, val sdp: String) : ClientMessage(MessageType.SDPMessage)
 data class ICEMessage(val label: Int, val id: String, val candidate: String) : ClientMessage(MessageType.ICEMessage)
 data class MatchMessage(val match: String, val offer: Boolean) : ClientMessage(MessageType.MatchMessage)
 class PeerLeft : ClientMessage(MessageType.PeerLeft)
@@ -44,7 +44,7 @@ class SignalingWebSocket : WebSocketListener() {
         val clientMessage =
             when(type) {
                 "sdp" ->
-                    SDPMessage(json.getString("sdp"))
+                    SDPMessage(json.getInt("sdpType"), json.getString("sdp"))
                 "ice" ->
                     ICEMessage(json.getInt("label"), json.getString("id"), json.getString("candidate"))
                 "matched" ->
@@ -74,6 +74,7 @@ class SignalingWebSocket : WebSocketListener() {
         json.put("type", clientMessage.type)
         when(clientMessage) {
             is SDPMessage -> {
+                json.put("sdpType", clientMessage.sdpType)
                 json.put("sdp", clientMessage.sdp)
             }
             is ICEMessage -> {
@@ -94,8 +95,8 @@ class SignalingWebSocket : WebSocketListener() {
         webSocket?.close(1000, null)
     }
 
-    fun sendSDP(sdp: String) {
-        send(SDPMessage(sdp))
+    fun sendSDP(type: Int, sdp: String) {
+        send(SDPMessage(type, sdp))
     }
 
     fun sendCandidate(label: Int, id: String, candidate: String) {

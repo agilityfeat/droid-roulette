@@ -14,7 +14,7 @@ import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 import ventures.webrtc.webrtcroulette.videocall.VideoCallSession
 import ventures.webrtc.webrtcroulette.videocall.VideoCallStatus
-import ventures.webrtc.webrtcroulette.videocall.VideoRenderers
+import ventures.webrtc.webrtcroulette.videocall.VideoSinks
 
 class VideoCallActivity : AppCompatActivity() {
 
@@ -88,7 +88,7 @@ class VideoCallActivity : AppCompatActivity() {
     }
 
     private fun startVideoSession() {
-        videoSession = VideoCallSession.connect(this, BACKEND_URL, VideoRenderers(localVideoView, remoteVideoView), this::onStatusChanged)
+        videoSession = VideoCallSession.connect(applicationContext, BACKEND_URL, VideoSinks(localVideoView, remoteVideoView), this::onStatusChanged)
 
         localVideoView?.init(videoSession?.renderContext, null)
         localVideoView?.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
@@ -115,8 +115,8 @@ class VideoCallActivity : AppCompatActivity() {
     }
 
     companion object {
-        private val CAMERA_AUDIO_PERMISSION_REQUEST = 1
-        private val TAG = "VideoCallActivity"
-        private val BACKEND_URL = "ws://HOST:8000/" // Change HOST to your server's IP if you want to test
+        const val CAMERA_AUDIO_PERMISSION_REQUEST = 1
+        const val TAG = "VideoCallActivity"
+        const val BACKEND_URL = "ws://HOST:8000/" // Change HOST to your server's IP if you want to test
     }
 }
